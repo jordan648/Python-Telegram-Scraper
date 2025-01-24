@@ -6,6 +6,7 @@ from telethon import TelegramClient
 from telethon.tl.functions.channels import JoinChannelRequest
 import os
 import asyncio
+import json
 
 #For your api_id and your api_hash you have two options.
 #1. copy and paste the api_id and api_hash from my.telegram.org directly into the variables below.
@@ -45,13 +46,18 @@ async def scrape_messages(client, channel_link, limit=100, output_file='scraped_
         print(f"Failed to scrape messages from {channel_link}; Error: {e}")
 
 async def main():
+        #Reads channel links from a JSON file
+    with open('channel_links.json', 'r') as f:
+        data = json.load(f)
+        channel_link = data.get('channel_link', [])
 
-    #Add a variable here to store the channel link
-        #Example: channel_link = 'https://t.me/your_channel_link'
-
-    channel_link = 'https://t.me/z3xploitchat'
-    await join_channel(client, channel_link)
-    await scrape_messages(client, channel_link, limit=100)
+    if not channel_link:
+        print("No channel links provided in JSON file.")
+        return
+    for channel_link in channel_link:
+        await join_channel(client, channel_link)
+        output_file = f"scraped_messages_{channel_link.split('/')[-1]}.txt" # Create a unique output file name for each channel
+        await scrape_messages(client, channel_link, limit=100, output_file=output_file)
 
 with client:
     client.loop.run_until_complete(main())

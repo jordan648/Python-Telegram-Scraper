@@ -1,25 +1,30 @@
 #This is a script to scrape messages from a Telegram channel using the Telethon library. It includes functions to join a channel and scrape messages.
 #Install the Telethon library using the pip install telethon command in power shell or terminal.
 #For educational purposes only. Use responsibly and ethically.
-
-from telethon import TelegramClient
-from telethon.tl.functions.channels import JoinChannelRequest
+import nltk
+import signal
+import multiprocessing
+import pandas as pd
+import hashlib
+import csv
 import os
 import asyncio
 import json
+import aiofiles
+import logging
 from dotenv import load_dotenv
 from telethon.tl.types import Channel
-import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize, sent_tokenize
 from nltk.stem import PorterStemmer
 from nltk.sentiment import SentimentIntensityAnalyzer
-import signal
-import multiprocessing
 from functools import partial
-import pandas as pd
-import hashlib
-import csv
+from telethon import TelegramClient
+from telethon.tl.functions.channels import JoinChannelRequest
+from fuzzywuzzy import fuzz
+
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 load_dotenv()
 
@@ -57,9 +62,9 @@ def ensure_nltk_data():
         nltk.download('tokenize')
         nltk.download('averaged_perceptron_tagger_eng')
         nltk.download('maxent_ne_chunker_tab')
-        print("NLTK data verified and downloaded successfully.")
+        logging.info("NLTK data verified and downloaded successfully.")
     except Exception as e:
-        print(f"Error downloading NLTK data: {e}")
+        logging.error(f"Error downloading NLTK data: {e}")
 
 def analyze_sentiment(message):
     return sia.polarity_scores(message)
@@ -80,9 +85,9 @@ def named_entity_recognition(message):
 async def join_channel(client, channel_link):
     try:
         await client(JoinChannelRequest(channel_link))
-        print(f"Successfully joined {channel_link}")
+        logging.info(f"Successfully joined {channel_link}")
     except Exception as e:
-        print(f"Failed to join {channel_link}; Error: {e}")
+        logging.error(f"Failed to join {channel_link}; Error: {e}")
 
 #Modify the amount of messages to scrape by adjusting the limit parameter in the scrape_messages function below. The default is 100 messages.
 
@@ -95,9 +100,9 @@ async def scrape_messages(client, channel_link, limit=100, output_file=None):
             unque_name = hashlib.md5(channel_link.encode()).hexdigest()
             output_file = f"scraped_messages_{unque_name}.csv" # Generate a unique name for the output file based on the channel link
 
-        with open(output_file, 'w', encoding='utf-8') as f:
+        async with aiofiles.open(output_file, 'w', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(['Message Number', 'Text', 'Sentiment', 'Entities', 'Sentences', 'Words'])
+            await writer.writerow(['Message Number', 'Text', 'Sentiment', 'Entities', 'Sentences', 'Words'])
             async for message in client.iter_messages(channel, limit=limit): 
                 if message.text: 
                     count += 1
@@ -106,26 +111,23 @@ async def scrape_messages(client, channel_link, limit=100, output_file=None):
                     words = word_tokenize(message.text) # Tokenize the message into words
                     sentiment = analyze_sentiment(message.text) # Analyze sentiment of the message
                     entities = named_entity_recognition(message.text) # Perform named entity recognition on the message
-
-                    writer.writerow([count, message.text, sentiment, entities, sentences, words]) # Write the message to the output file
-
-                    print(f"Message {count}") # Print message count
+                    await writer.writerow([count, message.text, sentiment, entities, sentences, words]) # Write the message to the output file
+                    logging.info(f"Message {count}") # Print message count
 
 
-        print(f"Scraped {count} messages from {channel_link} and saved to {output_file}") 
+        logging.info(f"Scraped {count} messages from {channel_link} and saved to {output_file}") 
     except Exception as e:
-        print(f"Failed to scrape messages from {channel_link}; Error: {e}")
+        logging.error(f"Failed to scrape messages from {channel_link}; Error: {e}")
 
-async def search_for_channels(client, keywords):
-    await client.start()
+async def search_for_channels(client, keywords, threshold=80):
     matching_channels = []
 
     async for dialog in client.iter_dialogs():
         if isinstance(dialog.entity, Channel):
             channel_name = dialog.name.lower()
             for keyword in keywords:
-                if keyword.lower() in channel_name:
-                    print(f"Found channel: {dialog.name} ({dialog.entity.id})")
+                if fuzz.partial_ratio(keyword.lower(), channel_name) >= threshold:
+                    logging.info(f"Found channel: {dialog.name} ({dialog.entity.id})")
                     matching_channels.append(dialog.entity)
                     break
     return matching_channels
@@ -139,7 +141,7 @@ async def main():
         channel_link = data.get('channel_link', [])
 
     if not channel_link:
-        print("No channel links provided in JSON file.")
+        logging.error("No channel links provided in JSON file.")
         return
     
     try:
@@ -148,36 +150,36 @@ async def main():
             keywords = data.get('keywords', [])
 
     except FileNotFoundError:
-        print("No keywords provided in JSON file.")
+        logging.error("No keywords provided in JSON file.")
         return
     
     if not keywords:
-        print("No keywords provided in JSON file.")
+        logging.error("No keywords provided in JSON file.")
         return
 
      #Search for channels matching the keywords
     
-    print("Searching for channels...")
+    logging.info("Searching for channels...")
     found_channels = await search_for_channels(client, keywords)
-    print(f"Found {len(found_channels)} channels matching the keywords.")
+    logging.info(f"Found {len(found_channels)} channels matching the keywords.")
 
     all_channels = list(set(channel_link)) + found_channels  # Combine unique channels from JSON and search results
-
+    
+    tasks = []  # List to hold all tasks
     for channel in found_channels:
         channel_link = f"https://t.me/{channel.username}" if channel.username else None
         if channel_link:
             all_channels.append(channel_link)  # Add the channel link to the list
 
     for channel_link in all_channels:
-        print(f"Joining and scraping {channel_link}...")
-        await join_channel(client, channel_link) # Join the channel if not already a member
-
+        logging.info(f"Joining and scraping {channel_link}...")
+        tasks.append(join_channel(client, channel_link)) # Join the channel if not already a member
         await asyncio.sleep(3)  # Sleep for 5 seconds to avoid hitting the rate limit
-
         # Create a unique output file name for each channel
         await scrape_messages(client, channel_link, limit=100)  # Scrape messages from the channel
-
         await asyncio.sleep(1)  # Sleep for 5 seconds to avoid hitting the rate limit
+
+    await asyncio.gather(*tasks)
 
 with client:
     client.loop.run_until_complete(main())

@@ -6,11 +6,9 @@ import signal
 import multiprocessing
 import pandas as pd
 import hashlib
-import csv
 import os
 import asyncio
 import json
-import aiofiles
 import logging
 from dotenv import load_dotenv
 from telethon.tl.types import Channel
@@ -21,6 +19,7 @@ from nltk.sentiment import SentimentIntensityAnalyzer
 from functools import partial
 from telethon import TelegramClient
 from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.types import Channel
 from fuzzywuzzy import fuzz
 
 
@@ -97,39 +96,49 @@ async def scrape_messages(client, channel_link, limit=100, output_file=None):
         channel = await client.get_input_entity(channel_link)
         count = 0 # Initialize message count
         if output_file is None:
-            unque_name = hashlib.md5(channel_link.encode()).hexdigest()
-            output_file = f"scraped_messages_{unque_name}.csv" # Generate a unique name for the output file based on the channel link
+            unique_name = hashlib.md5(channel_link.encode()).hexdigest()
+            output_file = f"scraped_messages_{unique_name}.csv" # Generate a unique name for the output file based on the channel link
 
-        async with aiofiles.open(output_file, 'w', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            await writer.writerow(['Message Number', 'Text', 'Sentiment', 'Entities', 'Sentences', 'Words'])
-            async for message in client.iter_messages(channel, limit=limit): 
-                if message.text: 
-                    count += 1
-                    #Tokenize the message
-                    sentences = sent_tokenize(message.text) # Tokenize the message into sentences
-                    words = word_tokenize(message.text) # Tokenize the message into words
-                    sentiment = analyze_sentiment(message.text) # Analyze sentiment of the message
-                    entities = named_entity_recognition(message.text) # Perform named entity recognition on the message
-                    await writer.writerow([count, message.text, sentiment, entities, sentences, words]) # Write the message to the output file
-                    logging.info(f"Message {count}") # Print message count
+        df = pd.DataFrame(columns=['Message Number', 'Text', 'Sentiment', 'Entities', 'Sentences', 'Words']) # Create a dataframe to store the messages 
 
+        async for message in client.iter_messages(channel, limit=limit): 
+            if message.text: 
+                count += 1
+                #Tokenize the message
+                sentences = sent_tokenize(message.text) # Tokenize the message into sentences
+                words = word_tokenize(message.text) # Tokenize the message into words
+                sentiment = analyze_sentiment(message.text) # Analyze sentiment of the message
+                entities = named_entity_recognition(message.text) # Perform named entity recognition on the message
+                message_df = pd.DataFrame([{
+                    'Message Number': count, 
+                    'Text': message.text, 
+                    'Sentiment': sentiment, 
+                    'Entities': entities, 
+                    'Sentences': sentences, 
+                    'Words': words
+                }]) # Add the message to the dataframe
 
+                df = pd.concat([df, message_df], ignore_index=True) # Concatenate the message dataframe with the main dataframe
+
+                logging.info(f"Message {count}") # Print message count
+
+        df.to_csv(output_file, index=False)
         logging.info(f"Scraped {count} messages from {channel_link} and saved to {output_file}") 
     except Exception as e:
         logging.error(f"Failed to scrape messages from {channel_link}; Error: {e}")
 
-async def search_for_channels(client, keywords, threshold=80):
+async def search_for_channels_by_messages(client, keywords, message_limit=100, threshold=80):
     matching_channels = []
-
     async for dialog in client.iter_dialogs():
         if isinstance(dialog.entity, Channel):
-            channel_name = dialog.name.lower()
-            for keyword in keywords:
-                if fuzz.partial_ratio(keyword.lower(), channel_name) >= threshold:
-                    logging.info(f"Found channel: {dialog.name} ({dialog.entity.id})")
-                    matching_channels.append(dialog.entity)
-                    break
+            channel = dialog.entity
+            async for message in client.iter_messages(channel, limit=message_limit):
+                if message.text:
+                    for keyword in keywords:
+                        if fuzz.partial_ratio(keyword.lower(), message.text.lower()) >= threshold:
+                            logging.info(f"Found Keyword '{keyword}' in channel: {dialog.name} ({dialog.entity.id})")
+                            matching_channels.append(channel)
+                            break
     return matching_channels
 
 async def main():
@@ -159,25 +168,23 @@ async def main():
 
      #Search for channels matching the keywords
     
-    logging.info("Searching for channels...")
-    found_channels = await search_for_channels(client, keywords)
-    logging.info(f"Found {len(found_channels)} channels matching the keywords.")
+    logging.info("Searching for channels by messages...")
+    found_channels = await search_for_channels_by_messages(client, keywords)
+    logging.info(f"Found {len(found_channels)} channels matching the keywords in messages.")
 
-    all_channels = list(set(channel_link)) + found_channels  # Combine unique channels from JSON and search results
-    
+    unique_channel_links = list(set(channel_link)) + found_channels  # Combine unique channels from JSON and search results
+
     tasks = []  # List to hold all tasks
     for channel in found_channels:
         channel_link = f"https://t.me/{channel.username}" if channel.username else None
         if channel_link:
-            all_channels.append(channel_link)  # Add the channel link to the list
+            unique_channel_links.append(channel_link)  # Add the channel link to the list
 
-    for channel_link in all_channels:
+    for channel_link in unique_channel_links:
         logging.info(f"Joining and scraping {channel_link}...")
         tasks.append(join_channel(client, channel_link)) # Join the channel if not already a member
-        await asyncio.sleep(3)  # Sleep for 5 seconds to avoid hitting the rate limit
-        # Create a unique output file name for each channel
-        await scrape_messages(client, channel_link, limit=100)  # Scrape messages from the channel
-        await asyncio.sleep(1)  # Sleep for 5 seconds to avoid hitting the rate limit
+        tasks.append(scrape_messages(client, channel_link, limit=100)) # Scrape messages from the channel
+        await asyncio.sleep(0.1)  # Sleep for 5 seconds to avoid hitting the rate limit
 
     await asyncio.gather(*tasks)
 
